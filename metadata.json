@@ -1,0 +1,6 @@
+{
+  "name": "SupportPilot — Autonomous Customer Support Agent",
+  "description": "Enterprise-grade autonomous AI customer support platform with real-time agentic workflows, intent detection, RAG knowledge retrieval, backend tool calling, human-in-the-loop escalations, and full support operations.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
