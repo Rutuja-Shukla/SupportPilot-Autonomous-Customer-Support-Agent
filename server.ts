@@ -17,6 +17,7 @@ import {
   ragEvaluationScenarios,
   runRAGBenchmark,
 } from './src/server/ragPipeline.ts';
+import { securityScenarios, runSecurityBenchmark } from './src/server/securitySuite.ts';
 
 dotenv.config();
 
@@ -328,6 +329,21 @@ app.post('/api/evaluation/run', async (_req, res) => {
   } catch (err: any) {
     console.error('Benchmark execution error:', err);
     res.status(500).json({ error: err.message || 'Benchmark run failed' });
+  }
+});
+
+// Autonomous Security & Authorization Benchmark
+app.get('/api/security/eval/scenarios', (_req, res) => {
+  res.json(securityScenarios);
+});
+
+app.post('/api/security/eval/run', async (_req, res) => {
+  try {
+    const report = await runSecurityBenchmark();
+    res.json(report);
+  } catch (err: any) {
+    console.error('Security benchmark execution error:', err);
+    res.status(500).json({ error: err.message || 'Security benchmark run failed' });
   }
 });
 

@@ -544,10 +544,19 @@ export async function request_order_cancellation(
     return { success: false, error: err };
   }
 
-  // Idempotency check
+  // Idempotency check (Must evaluate before eligibility checks so retransmissions replay cached response)
   const idempotencyKey = params.idempotencyKey || `cancel:${order.id}:${ctx.customerId || order.customerId}`;
   const existing = idempotencyStore.get(idempotencyKey);
   if (existing) {
+    db.addAuditEvent({
+      id: `audit-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      timestamp: new Date().toISOString(),
+      eventType: 'idempotent_replay',
+      severity: 'info',
+      actor: ctx.actor,
+      description: `Idempotency replay: Returned cached result for cancellation of ${order.orderNumber}.`,
+      metadata: { idempotencyKey, orderId: order.id },
+    });
     logToolExecution('request_order_cancellation', params, { ...existing.result, idempotentReplay: true }, 'success', startTime, ctx);
     return {
       ...existing.result,
@@ -557,6 +566,22 @@ export async function request_order_cancellation(
         idempotencyKey,
       },
     };
+  }
+
+  // Eligibility check before mutation
+  if (!order.cancellationEligibility.eligible) {
+    const err = `Cancellation policy rejection: ${order.cancellationEligibility.reason || 'Order status is ' + order.status}`;
+    logToolExecution('request_order_cancellation', params, { error: err }, 'rejected', startTime, ctx);
+    db.addAuditEvent({
+      id: `audit-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      timestamp: new Date().toISOString(),
+      eventType: 'policy_violation_prevented',
+      severity: 'warning',
+      actor: ctx.actor,
+      description: `Blocked unauthorized cancellation attempt on ineligible order ${order.orderNumber}. Reason: ${order.cancellationEligibility.reason}`,
+      metadata: { orderId: order.id, status: order.status, reason: order.cancellationEligibility.reason },
+    });
+    return { success: false, error: err };
   }
 
   const result = db.cancelOrder(order.id, params.reason || 'Customer request', ctx.actor);
@@ -611,7 +636,13 @@ export async function check_refund_eligibility(
   let reason = '';
   let requiresHumanApproval = order.totalAmount > 150;
 
-  if (!isDelivered) {
+  if (order.paymentStatus === 'refunded') {
+    eligible = false;
+    reason = `Order ${order.orderNumber} has already been fully refunded. No additional refunds can be processed.`;
+  } else if (order.status === 'cancelled') {
+    eligible = false;
+    reason = `Order ${order.orderNumber} was cancelled and refunded prior to shipment.`;
+  } else if (!isDelivered) {
     eligible = false;
     reason = `Order status is '${order.status}'. Refunds for undelivered items are handled through order cancellation or carrier lost package claims.`;
   } else if (daysSinceDelivery > 30) {
@@ -649,10 +680,25 @@ export async function create_refund_request(
     return { success: false, error: 'orderId and amount are required' };
   }
 
+  if (typeof params.amount !== 'number' || isNaN(params.amount) || params.amount <= 0) {
+    const err = 'Invalid refund amount: Amount must be a positive number greater than 0.';
+    logToolExecution('create_refund_request', params, { error: err }, 'rejected', startTime, ctx);
+    return { success: false, error: err };
+  }
+
   // Safety safeguard: Explicit confirmation check
   if (!params.customerConfirmed) {
     const err = 'Explicit customer confirmation is required before issuing a refund.';
     logToolExecution('create_refund_request', params, { error: err }, 'rejected', startTime, ctx);
+    db.addAuditEvent({
+      id: `audit-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      timestamp: new Date().toISOString(),
+      eventType: 'action_confirmation_required',
+      severity: 'info',
+      actor: ctx.actor,
+      description: `Halted unconfirmed refund request for order ${params.orderId}. Required explicit confirmation.`,
+      metadata: { orderId: params.orderId, amount: params.amount },
+    });
     return {
       success: false,
       error: err,
@@ -668,6 +714,75 @@ export async function create_refund_request(
   // Cross-tenant authorization check
   if (!checkCrossCustomerAccess(order.customerId, ctx, 'refund_request', order.orderNumber)) {
     const err = 'Security violation: Unauthorized attempt to refund order belonging to another customer';
+    logToolExecution('create_refund_request', params, { error: err }, 'rejected', startTime, ctx);
+    return { success: false, error: err };
+  }
+
+  // Idempotency check (Evaluate early so retransmissions replay cached receipt)
+  const idempotencyKey = params.idempotencyKey || `refund:${order.id}:${params.amount}:${ctx.customerId || order.customerId}`;
+  const existing = idempotencyStore.get(idempotencyKey);
+  if (existing) {
+    db.addAuditEvent({
+      id: `audit-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      timestamp: new Date().toISOString(),
+      eventType: 'idempotent_replay',
+      severity: 'info',
+      actor: ctx.actor,
+      description: `Idempotency replay: Returned cached result for refund of $${params.amount.toFixed(2)} on ${order.orderNumber}.`,
+      metadata: { idempotencyKey, orderId: order.id, amount: params.amount },
+    });
+    logToolExecution('create_refund_request', params, { ...existing.result, idempotentReplay: true }, 'success', startTime, ctx);
+    return {
+      ...existing.result,
+      metadata: {
+        ...existing.result.metadata,
+        idempotentReplay: true,
+        idempotencyKey,
+      },
+    };
+  }
+
+  // Check if order already refunded or cancelled
+  if (order.paymentStatus === 'refunded') {
+    const err = `Policy rejection: Order ${order.orderNumber} has already been refunded. Duplicate refunds are prohibited.`;
+    logToolExecution('create_refund_request', params, { error: err }, 'rejected', startTime, ctx);
+    db.addAuditEvent({
+      id: `audit-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      timestamp: new Date().toISOString(),
+      eventType: 'policy_violation_prevented',
+      severity: 'warning',
+      actor: ctx.actor,
+      description: `Blocked duplicate refund attempt on order ${order.orderNumber} (already refunded).`,
+      metadata: { orderId: order.id, amount: params.amount },
+    });
+    return { success: false, error: err };
+  }
+
+  if (order.status === 'cancelled') {
+    const err = `Policy rejection: Order ${order.orderNumber} is cancelled and was already refunded.`;
+    logToolExecution('create_refund_request', params, { error: err }, 'rejected', startTime, ctx);
+    return { success: false, error: err };
+  }
+
+  // Check 30-day policy return eligibility
+  if (!order.refundEligibility.eligible) {
+    const err = `Refund policy rejection: ${order.refundEligibility.reason}`;
+    logToolExecution('create_refund_request', params, { error: err }, 'rejected', startTime, ctx);
+    db.addAuditEvent({
+      id: `audit-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      timestamp: new Date().toISOString(),
+      eventType: 'policy_violation_prevented',
+      severity: 'warning',
+      actor: ctx.actor,
+      description: `Blocked ineligible refund request on order ${order.orderNumber}. Reason: ${order.refundEligibility.reason}`,
+      metadata: { orderId: order.id, amount: params.amount, reason: order.refundEligibility.reason },
+    });
+    return { success: false, error: err };
+  }
+
+  // Cap refund amount to order total
+  if (params.amount > order.totalAmount) {
+    const err = `Policy rejection: Refund amount $${params.amount.toFixed(2)} exceeds total order value of $${order.totalAmount.toFixed(2)}.`;
     logToolExecution('create_refund_request', params, { error: err }, 'rejected', startTime, ctx);
     return { success: false, error: err };
   }
@@ -691,25 +806,19 @@ export async function create_refund_request(
 
     const msg = `Refund of $${params.amount.toFixed(2)} exceeds our autonomous AI approval limit of $150.00. Per company security policy, this has been escalated to Lead Representative Alex Rivera on ticket ${ticket.ticketNumber} for immediate supervisor signoff.`;
     logToolExecution('create_refund_request', params, { escalated: true, ticketNumber: ticket.ticketNumber }, 'success', startTime, ctx);
+    db.addAuditEvent({
+      id: `audit-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      timestamp: new Date().toISOString(),
+      eventType: 'ticket_escalated',
+      severity: 'info',
+      actor: ctx.actor,
+      description: `High-value refund request ($${params.amount.toFixed(2)}) escalated to supervisor Alex Rivera (Ticket: ${ticket.ticketNumber}).`,
+      metadata: { orderId: order.id, amount: params.amount, ticketNumber: ticket.ticketNumber },
+    });
     return {
       success: false,
       error: msg,
       metadata: { escalatedToHuman: true, ticketNumber: ticket.ticketNumber, ticketId: ticket.id },
-    };
-  }
-
-  // Idempotency check
-  const idempotencyKey = params.idempotencyKey || `refund:${order.id}:${params.amount}:${ctx.customerId || order.customerId}`;
-  const existing = idempotencyStore.get(idempotencyKey);
-  if (existing) {
-    logToolExecution('create_refund_request', params, { ...existing.result, idempotentReplay: true }, 'success', startTime, ctx);
-    return {
-      ...existing.result,
-      metadata: {
-        ...existing.result.metadata,
-        idempotentReplay: true,
-        idempotencyKey,
-      },
     };
   }
 
@@ -837,16 +946,40 @@ export async function update_support_ticket(
   ctx: ToolExecutionContext
 ): Promise<ToolResult> {
   const startTime = Date.now();
+  const ticket = db.getTicketById(params.ticketId);
+  if (!ticket) {
+    return { success: false, error: 'Ticket not found.' };
+  }
+
+  // Cross-tenant customer check
+  if (!checkCrossCustomerAccess(ticket.customerId, ctx, 'ticket_update', ticket.ticketNumber)) {
+    const err = 'Security violation: Access to unauthorized ticket is blocked';
+    logToolExecution('update_support_ticket', params, { error: err }, 'rejected', startTime, ctx);
+    return { success: false, error: err };
+  }
+
+  // RBAC: Autonomous AI agent cannot close or resolve tickets unilaterally
+  if (ctx.actor === 'ai_agent' && (params.status === 'closed' || params.status === 'resolved')) {
+    const err = 'Security boundary: Autonomous AI agents cannot close or resolve tickets. Human supervisor signoff required.';
+    logToolExecution('update_support_ticket', params, { error: err }, 'rejected', startTime, ctx);
+    db.addAuditEvent({
+      id: `audit-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      timestamp: new Date().toISOString(),
+      eventType: 'policy_violation_prevented',
+      severity: 'warning',
+      actor: ctx.actor,
+      description: `Blocked autonomous ticket closure attempt on ticket ${ticket.ticketNumber} by ai_agent.`,
+      metadata: { ticketId: ticket.id, attemptedStatus: params.status },
+    });
+    return { success: false, error: err };
+  }
+
   const updated = db.updateTicket(params.ticketId, {
     status: params.status,
     priority: params.priority,
   });
 
-  if (!updated) {
-    return { success: false, error: 'Ticket not found.' };
-  }
-
-  if (params.internalNote) {
+  if (params.internalNote && updated) {
     db.addTicketNote(updated.id, {
       author: ctx.actor === 'ai_agent' ? 'Autonomous AI Agent' : 'Human Representative',
       authorRole: ctx.actor === 'ai_agent' ? 'System' : 'Support Specialist',
@@ -854,7 +987,7 @@ export async function update_support_ticket(
     });
   }
 
-  logToolExecution('update_support_ticket', params, { ticketNumber: updated.ticketNumber }, 'success', startTime, ctx);
+  logToolExecution('update_support_ticket', params, { ticketNumber: updated?.ticketNumber }, 'success', startTime, ctx);
   return { success: true, data: updated };
 }
 
@@ -863,6 +996,23 @@ export async function assign_support_ticket(
   ctx: ToolExecutionContext
 ): Promise<ToolResult> {
   const startTime = Date.now();
+
+  // Role check: Only human representatives or system dispatchers can assign tickets
+  if (ctx.actor === 'ai_agent') {
+    const err = 'Security boundary: Autonomous AI agents are not authorized to assign support tickets to representatives.';
+    db.addAuditEvent({
+      id: `audit-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      timestamp: new Date().toISOString(),
+      eventType: 'policy_violation_prevented',
+      severity: 'warning',
+      actor: ctx.actor,
+      description: `Blocked unauthorized ticket assignment attempt for ticket ${params.ticketId} by ai_agent.`,
+      metadata: { ticketId: params.ticketId, targetAgent: params.agentName },
+    });
+    logToolExecution('assign_support_ticket', params, { error: err }, 'rejected', startTime, ctx);
+    return { success: false, error: err };
+  }
+
   const updated = db.updateTicket(params.ticketId, {
     assignedAgentId: params.agentId,
     assignedAgentName: params.agentName,

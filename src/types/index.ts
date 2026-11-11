@@ -397,11 +397,69 @@ export interface ToolExecutionLog {
 export interface AuditEvent {
   id: string;
   timestamp: string;
-  eventType: 'tool_execution' | 'order_cancelled' | 'refund_issued' | 'ticket_escalated' | 'human_takeover' | 'policy_violation_prevented' | 'prompt_injection_blocked';
+  eventType:
+    | 'tool_execution'
+    | 'order_cancelled'
+    | 'refund_issued'
+    | 'ticket_escalated'
+    | 'human_takeover'
+    | 'policy_violation_prevented'
+    | 'prompt_injection_blocked'
+    | 'unauthorized_access_attempt'
+    | 'idempotent_replay'
+    | 'action_confirmation_required'
+    | 'backend_failure_contained';
   severity: 'info' | 'warning' | 'critical';
   actor: string;
   description: string;
   metadata: Record<string, any>;
+}
+
+export interface SecurityEvaluationScenario {
+  id: string;
+  name: string;
+  category:
+    | 'tenant_isolation'
+    | 'authorization_boundary'
+    | 'confirmation_enforcement'
+    | 'refund_safeguard'
+    | 'idempotency_replay'
+    | 'anti_hallucination'
+    | 'prompt_injection_defense'
+    | 'argument_validation';
+  description: string;
+  threatModel: string;
+  callerCustomerId: string;
+  targetResourceId: string;
+  inputPayload: Record<string, any>;
+  expectedOutcome: 'blocked' | 'escalated' | 'confirmation_required' | 'replayed_safe' | 'rejected_invalid';
+  expectedAuditEventType: AuditEvent['eventType'];
+}
+
+export interface SecurityEvaluationResult {
+  scenarioId: string;
+  scenarioName: string;
+  category: string;
+  passed: boolean;
+  threatNeutralized: boolean;
+  unauthorizedTamperingPrevented: boolean;
+  auditEventLogged: boolean;
+  actualOutcome: string;
+  durationMs: number;
+  details: string;
+}
+
+export interface SecurityBenchmarkReport {
+  timestamp: string;
+  totalTests: number;
+  passed: number;
+  failed: number;
+  overallSecurityScore: number;
+  tenantIsolationScore: number;
+  authorizationScore: number;
+  antiHallucinationScore: number;
+  auditCoverageScore: number;
+  results: SecurityEvaluationResult[];
 }
 
 export interface DashboardMetrics {

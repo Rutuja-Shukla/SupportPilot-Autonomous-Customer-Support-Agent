@@ -59,7 +59,9 @@ const MAX_EXECUTION_STEPS = 6;
 export function validateAndSanitizeResponse(
   rawText: string,
   toolTraces: StructuredToolTrace[],
-  resolvedOrder?: Order
+  resolvedOrder?: Order,
+  crossCustomerOrderBlocked?: boolean,
+  blockedOrderNumber?: string
 ): {
   validated: boolean;
   hallucinationChecks: {
@@ -82,26 +84,50 @@ export function validateAndSanitizeResponse(
   let noFabricatedTracking = true;
   let policyCitationsAccurate = true;
 
+  // 0. Cross-customer privacy boundary: Redact any leaked order details
+  if (crossCustomerOrderBlocked && blockedOrderNumber) {
+    if (lower.includes('delivered') || lower.includes('tracking') || lower.includes('$')) {
+      sanitized = true;
+      sanitizationNotes = 'Security boundary: Redacted cross-tenant order details from response.';
+      sanitizedText = `For privacy and security, access to order ${blockedOrderNumber} is restricted because it is not associated with your verified account. Please verify your order number or view your active orders.`;
+      return {
+        validated: true,
+        hallucinationChecks: {
+          orderStatusMatchesBackend: true,
+          refundAmountMatchesBackend: true,
+          noFabricatedTracking: true,
+          policyCitationsAccurate: true,
+        },
+        sanitized: true,
+        sanitizationNotes,
+        sanitizedText,
+      };
+    }
+  }
+
   // 1. Guard against claiming refund succeeded without successful create_refund_request tool
-  const hasSuccessfulRefundTool = toolTraces.some(
-    (t) => t.toolName === 'create_refund_request' && t.status === 'success' && t.executionResult?.success
+  const refundTool = toolTraces.find((t) => t.toolName === 'create_refund_request');
+  const hasSuccessfulRefundTool = Boolean(
+    refundTool && refundTool.status === 'success' && refundTool.executionResult?.success
   );
   const refundClaimPattern =
-    /(?:refund has been (?:issued|processed)|(?:issued|processed) a (?:full )?refund|refunded your (?:account|credit card)|successfully refunded|processed your refund)/i;
+    /(?:refund has been (?:issued|processed|disbursed)|(?:issued|processed) a (?:full )?refund|refunded your (?:account|credit card)|successfully refunded|processed your refund)/i;
 
   if (refundClaimPattern.test(lower) && !hasSuccessfulRefundTool) {
     refundAmountMatchesBackend = false;
     sanitized = true;
-    sanitizationNotes = 'Anti-hallucination guard: Removed unsupported claim of completed refund disbursement.';
+    const failureReason = refundTool?.executionResult?.error || 'policy requirements not met or supervisor authorization required';
+    sanitizationNotes = 'Anti-hallucination guard: Intercepted unsupported claim of completed refund disbursement when backend call failed/was not run.';
     sanitizedText = sanitizedText.replace(
       new RegExp(refundClaimPattern.source, 'gi'),
-      'refund request is being reviewed'
+      `refund could not be processed automatically (${failureReason})`
     );
   }
 
   // 2. Guard against claiming cancellation completed without successful request_order_cancellation tool
-  const hasSuccessfulCancelTool = toolTraces.some(
-    (t) => t.toolName === 'request_order_cancellation' && t.status === 'success' && t.executionResult?.success
+  const cancelTool = toolTraces.find((t) => t.toolName === 'request_order_cancellation');
+  const hasSuccessfulCancelTool = Boolean(
+    cancelTool && cancelTool.status === 'success' && cancelTool.executionResult?.success
   );
   const cancelClaimPattern =
     /(?:order has been (?:successfully )?cancelled|cancelled your order|successfully cancelled)/i;
@@ -109,11 +135,12 @@ export function validateAndSanitizeResponse(
   if (cancelClaimPattern.test(lower) && !hasSuccessfulCancelTool) {
     orderStatusMatchesBackend = false;
     sanitized = true;
+    const failureReason = cancelTool?.executionResult?.error || 'cancellation eligibility verification required';
     sanitizationNotes = (sanitizationNotes ? sanitizationNotes + ' ' : '') +
-      'Anti-hallucination guard: Removed unsupported claim of completed cancellation.';
+      'Anti-hallucination guard: Intercepted unsupported claim of completed cancellation when backend call failed/was not run.';
     sanitizedText = sanitizedText.replace(
       new RegExp(cancelClaimPattern.source, 'gi'),
-      'order cancellation eligibility is being checked'
+      `order cancellation could not be processed (${failureReason})`
     );
   }
 
@@ -329,32 +356,68 @@ export class AgentOrchestrator {
     // -------------------------------------------------------------
     steps.push({ stage: '5_ACTION_PLANNING', label: 'Action Planning & Tool Invocation', status: 'pending' });
 
-    // Target order identification
+    // Target order identification with tenant boundary validation
     let targetOrderNumber = intentResult.entities?.orderNumber;
     if (!targetOrderNumber) {
       const match = params.userMessage.match(/(?:SP-ORD-|ord-)\d+/i);
       if (match) targetOrderNumber = match[0].toUpperCase();
     }
-    const resolvedOrder = targetOrderNumber
-      ? db.getOrderByIdOrNumber(targetOrderNumber)
-      : customerOrders[0];
+
+    let crossCustomerOrderBlocked = false;
+    let resolvedOrder: Order | undefined = undefined;
+
+    if (targetOrderNumber) {
+      const candidate = db.getOrderByIdOrNumber(targetOrderNumber);
+      if (candidate) {
+        if (candidate.customerId !== customer.id) {
+          crossCustomerOrderBlocked = true;
+          db.addAuditEvent({
+            id: `audit-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+            timestamp: new Date().toISOString(),
+            eventType: 'unauthorized_access_attempt',
+            severity: 'warning',
+            actor: ctx.actor,
+            description: `Security boundary: Blocked unauthorized cross-tenant order reference '${targetOrderNumber}' belonging to customer ${candidate.customerId} from caller ${customer.id}.`,
+            metadata: { callerCustomerId: customer.id, targetOrder: targetOrderNumber, ownerCustomerId: candidate.customerId },
+          });
+        } else {
+          resolvedOrder = candidate;
+        }
+      }
+    }
+
+    if (!resolvedOrder && !crossCustomerOrderBlocked) {
+      resolvedOrder = customerOrders[0];
+    }
 
     const plannedTools: { toolName: keyof typeof toolRegistry; rawParams: any }[] = [];
 
     // Customer profile verification
     plannedTools.push({ toolName: 'get_customer_profile', rawParams: { customerId: customer.id } });
 
-    if (intentResult.intent === 'order_tracking') {
+    // Strict Consequential Confirmation Enforcement
+    const prevMsgs = conv.messages;
+    const lastAgentMsg = prevMsgs.length >= 2 && prevMsgs[prevMsgs.length - 2].sender === 'agent'
+      ? prevMsgs[prevMsgs.length - 2].content
+      : '';
+    const wasAwaitingConfirmation = /confirm|would you like me to|proceed with (cancellation|refund)|are you sure/i.test(lastAgentMsg);
+    const userExplicitlyAgreed = /^(yes|confirm|proceed|yes please|do it|confirm cancellation|confirm refund)[\.!]?$/i.test(params.userMessage.trim());
+
+    const isConfirming = Boolean(params.explicitConfirmation) || (wasAwaitingConfirmation && userExplicitlyAgreed);
+
+    if (crossCustomerOrderBlocked) {
+      // Do not plan operations on another customer's order
+      steps[4].data = {
+        securityBoundary: 'Cross-tenant order access blocked',
+        blockedOrder: targetOrderNumber,
+      };
+    } else if (intentResult.intent === 'order_tracking') {
       if (resolvedOrder) {
         plannedTools.push({ toolName: 'get_order_status', rawParams: { orderIdOrNumber: resolvedOrder.orderNumber } });
       }
     } else if (intentResult.intent === 'order_cancellation') {
       if (resolvedOrder) {
         plannedTools.push({ toolName: 'check_cancellation_eligibility', rawParams: { orderIdOrNumber: resolvedOrder.orderNumber } });
-
-        const isConfirming =
-          params.explicitConfirmation ||
-          /yes|confirm|proceed|cancel it|please cancel/i.test(params.userMessage);
 
         if (isConfirming && resolvedOrder.cancellationEligibility.eligible) {
           plannedTools.push({
@@ -377,10 +440,6 @@ export class AgentOrchestrator {
     } else if (intentResult.intent === 'refund_request' || intentResult.intent === 'return_request') {
       if (resolvedOrder) {
         plannedTools.push({ toolName: 'check_refund_eligibility', rawParams: { orderId: resolvedOrder.id } });
-
-        const isConfirming =
-          params.explicitConfirmation ||
-          /confirm|yes please|issue refund|process return/i.test(params.userMessage);
 
         if (isConfirming && resolvedOrder.refundEligibility.eligible) {
           plannedTools.push({
@@ -580,11 +639,18 @@ export class AgentOrchestrator {
 
     sources = rawGroundedReply.sources;
 
-    // Response Validation (Anti-Hallucination Guard)
+    // Response Validation (Anti-Hallucination & Tenant Isolation Guard)
+    let replyText = rawGroundedReply.text;
+    if (crossCustomerOrderBlocked && targetOrderNumber) {
+      replyText = `For customer privacy and security regulations, access to order ${targetOrderNumber} is restricted because it is not associated with your verified customer account. Please verify your order number or check your recent orders.`;
+    }
+
     const responseValidation = validateAndSanitizeResponse(
-      rawGroundedReply.text,
+      replyText,
       structuredToolTraces,
-      resolvedOrder
+      resolvedOrder,
+      crossCustomerOrderBlocked,
+      targetOrderNumber
     );
 
     steps[6].status = responseValidation.sanitized ? 'warning' : 'success';

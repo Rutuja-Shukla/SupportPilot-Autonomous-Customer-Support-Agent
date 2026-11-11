@@ -10,6 +10,7 @@ import {
   Play,
   RotateCw,
   ShieldCheck,
+  ShieldAlert,
   Cpu,
   Target,
   Sparkles,
@@ -20,19 +21,31 @@ import {
   Layers,
   ChevronDown,
   ChevronUp,
-  ExternalLink,
+  Lock,
+  UserCheck,
+  CreditCard,
+  Ban,
+  Activity,
 } from 'lucide-react';
 import {
   BenchmarkReport,
   EvaluationScenario,
   RAGBenchmarkReport,
   RAGEvaluationScenario,
+  SecurityBenchmarkReport,
+  SecurityEvaluationScenario,
 } from '../types/index.ts';
 
-type ActiveSuite = 'agent' | 'rag';
+type ActiveSuite = 'security' | 'rag' | 'agent';
 
 export const EvaluationView: React.FC = () => {
-  const [activeSuite, setActiveSuite] = useState<ActiveSuite>('rag');
+  const [activeSuite, setActiveSuite] = useState<ActiveSuite>('security');
+
+  // Security Suite state
+  const [securityScenarios, setSecurityScenarios] = useState<SecurityEvaluationScenario[]>([]);
+  const [securityReport, setSecurityReport] = useState<SecurityBenchmarkReport | null>(null);
+  const [isSecurityRunning, setIsSecurityRunning] = useState<boolean>(false);
+  const [selectedSecurityCategory, setSelectedSecurityCategory] = useState<string>('all');
 
   // Agent Orchestrator state
   const [agentScenarios, setAgentScenarios] = useState<EvaluationScenario[]>([]);
@@ -47,9 +60,19 @@ export const EvaluationView: React.FC = () => {
   const [expandedResultId, setExpandedResultId] = useState<string | null>(null);
 
   useEffect(() => {
+    fetchSecurityScenarios();
     fetchAgentScenarios();
     fetchRagScenarios();
   }, []);
+
+  const fetchSecurityScenarios = async () => {
+    try {
+      const res = await fetch('/api/security/eval/scenarios');
+      if (res.ok) setSecurityScenarios(await res.json());
+    } catch (err) {
+      console.error('Error fetching security scenarios:', err);
+    }
+  };
 
   const fetchAgentScenarios = async () => {
     try {
@@ -66,6 +89,21 @@ export const EvaluationView: React.FC = () => {
       if (res.ok) setRagScenarios(await res.json());
     } catch (err) {
       console.error('Error fetching RAG scenarios:', err);
+    }
+  };
+
+  const handleRunSecurityBenchmark = async () => {
+    setIsSecurityRunning(true);
+    try {
+      const res = await fetch('/api/security/eval/run', { method: 'POST' });
+      if (res.ok) {
+        const data = await res.json();
+        setSecurityReport(data);
+      }
+    } catch (err) {
+      console.error('Error running security benchmark:', err);
+    } finally {
+      setIsSecurityRunning(false);
     }
   };
 
@@ -99,6 +137,11 @@ export const EvaluationView: React.FC = () => {
     }
   };
 
+  const filteredSecurityScenarios = securityScenarios.filter((sc) => {
+    if (selectedSecurityCategory === 'all') return true;
+    return sc.category === selectedSecurityCategory;
+  });
+
   const filteredRagScenarios = ragScenarios.filter((sc) => {
     if (selectedRagCategory === 'all') return true;
     return sc.category === selectedRagCategory;
@@ -114,30 +157,32 @@ export const EvaluationView: React.FC = () => {
             Verification, Safety & Regression Evaluation
           </h1>
           <p className="text-xs text-slate-400 mt-1">
-            Production verification harness for autonomous agent orchestration, RAG retrieval relevance, source attribution, and safety boundaries.
+            Automated evaluation harness for enterprise security boundaries, tenant isolation, RAG grounding, and autonomous agent orchestration.
           </p>
         </div>
 
         {/* Action button based on active suite */}
-        {activeSuite === 'agent' ? (
+        {activeSuite === 'security' && (
           <button
-            onClick={handleRunAgentBenchmark}
-            disabled={isAgentRunning}
-            className="flex items-center gap-2 rounded-lg bg-emerald-600 px-4 py-2 text-xs font-semibold text-white hover:bg-emerald-500 transition disabled:opacity-50 shadow-md shadow-emerald-950/40"
+            onClick={handleRunSecurityBenchmark}
+            disabled={isSecurityRunning}
+            className="flex items-center gap-2 rounded-lg bg-red-600 px-4 py-2 text-xs font-semibold text-white hover:bg-red-500 transition disabled:opacity-50 shadow-md shadow-red-950/40"
           >
-            {isAgentRunning ? (
+            {isSecurityRunning ? (
               <>
                 <RotateCw className="h-4 w-4 animate-spin" />
-                <span>Running Agent Evaluation...</span>
+                <span>Running Security Audit...</span>
               </>
             ) : (
               <>
                 <Play className="h-4 w-4 fill-current" />
-                <span>Run Agent Benchmark (12 Tests)</span>
+                <span>Run Security Audit ({securityScenarios.length || 12} Tests)</span>
               </>
             )}
           </button>
-        ) : (
+        )}
+
+        {activeSuite === 'rag' && (
           <button
             onClick={handleRunRagBenchmark}
             disabled={isRagRunning}
@@ -156,10 +201,50 @@ export const EvaluationView: React.FC = () => {
             )}
           </button>
         )}
+
+        {activeSuite === 'agent' && (
+          <button
+            onClick={handleRunAgentBenchmark}
+            disabled={isAgentRunning}
+            className="flex items-center gap-2 rounded-lg bg-emerald-600 px-4 py-2 text-xs font-semibold text-white hover:bg-emerald-500 transition disabled:opacity-50 shadow-md shadow-emerald-950/40"
+          >
+            {isAgentRunning ? (
+              <>
+                <RotateCw className="h-4 w-4 animate-spin" />
+                <span>Running Agent Evaluation...</span>
+              </>
+            ) : (
+              <>
+                <Play className="h-4 w-4 fill-current" />
+                <span>Run Agent Benchmark (12 Tests)</span>
+              </>
+            )}
+          </button>
+        )}
       </div>
 
       {/* Suite Tabs */}
-      <div className="flex items-center gap-3 border-b border-slate-800 pb-2">
+      <div className="flex flex-wrap items-center gap-2 border-b border-slate-800 pb-2">
+        <button
+          onClick={() => setActiveSuite('security')}
+          className={`flex items-center gap-2 px-3 py-2 text-xs font-bold rounded-lg transition ${
+            activeSuite === 'security'
+              ? 'bg-red-950/60 text-red-300 border border-red-800 shadow-sm'
+              : 'text-slate-400 hover:text-white hover:bg-slate-900/60'
+          }`}
+        >
+          <Lock className="h-4 w-4 text-red-400" />
+          <span>Security & Authorization Audit</span>
+          <span className="rounded bg-red-900/80 px-2 py-0.5 text-[10px] text-red-200">
+            {securityScenarios.length || 12} Tests
+          </span>
+          {securityReport && (
+            <span className="rounded bg-emerald-950 px-1.5 py-0.5 text-[10px] text-emerald-300 font-mono border border-emerald-800">
+              {securityReport.overallSecurityScore}% Passed
+            </span>
+          )}
+        </button>
+
         <button
           onClick={() => setActiveSuite('rag')}
           className={`flex items-center gap-2 px-3 py-2 text-xs font-bold rounded-lg transition ${
@@ -168,7 +253,7 @@ export const EvaluationView: React.FC = () => {
               : 'text-slate-400 hover:text-white hover:bg-slate-900/60'
           }`}
         >
-          <Search className="h-4 w-4" />
+          <Search className="h-4 w-4 text-cyan-400" />
           <span>Semantic RAG & Grounding Suite</span>
           <span className="rounded bg-cyan-900/80 px-2 py-0.5 text-[10px] text-cyan-200">
             {ragScenarios.length || 10} Tests
@@ -188,7 +273,7 @@ export const EvaluationView: React.FC = () => {
               : 'text-slate-400 hover:text-white hover:bg-slate-900/60'
           }`}
         >
-          <Cpu className="h-4 w-4" />
+          <Cpu className="h-4 w-4 text-emerald-400" />
           <span>Agent Orchestration Suite</span>
           <span className="rounded bg-emerald-900/80 px-2 py-0.5 text-[10px] text-emerald-200">
             {agentScenarios.length || 12} Tests
@@ -202,11 +287,234 @@ export const EvaluationView: React.FC = () => {
       </div>
 
       {/* ============================================================== */}
-      {/* TAB 1: SEMANTIC RAG & GROUNDING SUITE */}
+      {/* TAB 1: ENTERPRISE SECURITY & AUTHORIZATION AUDIT */}
+      {/* ============================================================== */}
+      {activeSuite === 'security' && (
+        <div className="space-y-6">
+          {/* Security Scorecards */}
+          {securityReport ? (
+            <div className="grid grid-cols-2 md:grid-cols-5 gap-3 animate-in fade-in">
+              <div className="rounded-xl border border-red-800 bg-red-950/30 p-4">
+                <span className="text-[11px] font-semibold text-red-400 uppercase tracking-wider">
+                  Overall Security Score
+                </span>
+                <div className="mt-1 text-3xl font-bold text-white">{securityReport.overallSecurityScore}%</div>
+                <p className="mt-1 text-[11px] text-red-300">
+                  {securityReport.passed} / {securityReport.totalTests} boundaries verified
+                </p>
+              </div>
+
+              <div className="rounded-xl border border-slate-800 bg-slate-900/60 p-4">
+                <span className="text-[11px] font-semibold text-emerald-400 uppercase tracking-wider">
+                  Tenant Isolation
+                </span>
+                <div className="mt-1 text-3xl font-bold text-white">{securityReport.tenantIsolationScore}%</div>
+                <p className="mt-1 text-[11px] text-slate-400">Zero cross-account leaks</p>
+              </div>
+
+              <div className="rounded-xl border border-slate-800 bg-slate-900/60 p-4">
+                <span className="text-[11px] font-semibold text-blue-400 uppercase tracking-wider">
+                  Authorization Boundary
+                </span>
+                <div className="mt-1 text-3xl font-bold text-white">{securityReport.authorizationScore}%</div>
+                <p className="mt-1 text-[11px] text-slate-400">Capped refunds & RBAC enforced</p>
+              </div>
+
+              <div className="rounded-xl border border-slate-800 bg-slate-900/60 p-4">
+                <span className="text-[11px] font-semibold text-amber-400 uppercase tracking-wider">
+                  Anti-Hallucination
+                </span>
+                <div className="mt-1 text-3xl font-bold text-white">{securityReport.antiHallucinationScore}%</div>
+                <p className="mt-1 text-[11px] text-slate-400">No false action completion</p>
+              </div>
+
+              <div className="rounded-xl border border-slate-800 bg-slate-900/60 p-4">
+                <span className="text-[11px] font-semibold text-purple-400 uppercase tracking-wider">
+                  Audit Log Coverage
+                </span>
+                <div className="mt-1 text-3xl font-bold text-white">{securityReport.auditCoverageScore}%</div>
+                <p className="mt-1 text-[11px] text-slate-400">Forensic event trail verified</p>
+              </div>
+            </div>
+          ) : (
+            <div className="rounded-xl border border-red-900/50 bg-red-950/20 p-4 flex items-center justify-between">
+              <div className="flex items-center gap-3">
+                <Lock className="h-5 w-5 text-red-400 shrink-0" />
+                <div className="text-xs">
+                  <div className="font-bold text-white">Enterprise Security & Authorization Benchmark Loaded</div>
+                  <div className="text-slate-400">
+                    Exhaustive tests covering tenant isolation, cross-customer tamper resistance, $150 refund ceiling, confirmation enforcement, idempotency replays, and backend failure containment.
+                  </div>
+                </div>
+              </div>
+              <button
+                onClick={handleRunSecurityBenchmark}
+                disabled={isSecurityRunning}
+                className="shrink-0 flex items-center gap-1.5 rounded-lg bg-red-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-red-500 transition"
+              >
+                <Play className="h-3.5 w-3.5 fill-current" />
+                Run Security Audit
+              </button>
+            </div>
+          )}
+
+          {/* Security Category Filter Pills */}
+          <div className="flex flex-wrap items-center gap-1.5 text-xs">
+            <span className="text-slate-400 text-[11px] mr-2">Filter by Boundary:</span>
+            {[
+              { id: 'all', label: 'All Boundaries (12)' },
+              { id: 'tenant_isolation', label: 'Tenant Isolation' },
+              { id: 'authorization_boundary', label: 'Authorization & RBAC' },
+              { id: 'confirmation_enforcement', label: 'Confirmation Guards' },
+              { id: 'refund_safeguard', label: 'Refund Ceilings' },
+              { id: 'idempotency_replay', label: 'Idempotency Replay' },
+              { id: 'anti_hallucination', label: 'Failure Containment' },
+              { id: 'prompt_injection_defense', label: 'Injection Defense' },
+            ].map((cat) => (
+              <button
+                key={cat.id}
+                onClick={() => setSelectedSecurityCategory(cat.id)}
+                className={`rounded-full px-2.5 py-1 text-[11px] font-medium transition ${
+                  selectedSecurityCategory === cat.id
+                    ? 'bg-red-500/20 text-red-300 border border-red-500/40'
+                    : 'bg-slate-900 text-slate-400 hover:text-slate-200 border border-slate-800'
+                }`}
+              >
+                {cat.label}
+              </button>
+            ))}
+          </div>
+
+          {/* Security Scenarios List */}
+          <div className="space-y-3">
+            {filteredSecurityScenarios.map((sc) => {
+              const result = securityReport?.results.find((r) => r.scenarioId === sc.id);
+
+              return (
+                <div
+                  key={sc.id}
+                  className={`rounded-xl border p-4 text-xs transition ${
+                    result
+                      ? result.passed
+                        ? 'border-emerald-800/80 bg-emerald-950/20'
+                        : 'border-red-800/80 bg-red-950/20'
+                      : 'border-slate-800 bg-slate-900/60'
+                  }`}
+                >
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="space-y-1">
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <span className="font-mono text-red-400 font-bold">{sc.id}</span>
+                        <span className="font-bold text-white text-sm">{sc.name}</span>
+                        <span className="rounded bg-slate-800 px-2 py-0.5 text-[10px] text-slate-300 border border-slate-700">
+                          {sc.category}
+                        </span>
+                        <span className="rounded bg-slate-950 px-2 py-0.5 text-[10px] text-amber-300 border border-slate-800 font-mono">
+                          Expected: {sc.expectedOutcome}
+                        </span>
+                      </div>
+                      <p className="text-slate-400 text-[11px]">{sc.description}</p>
+                      <div className="text-[10px] text-slate-400 font-mono flex items-center gap-2 pt-0.5">
+                        <span className="text-red-400 font-semibold">Threat Model:</span>
+                        <span>{sc.threatModel}</span>
+                      </div>
+                    </div>
+
+                    {result ? (
+                      <div className="flex items-center gap-2 shrink-0">
+                        <span className="text-slate-400 font-mono text-[11px]">{result.durationMs}ms</span>
+                        {result.passed ? (
+                          <span className="inline-flex items-center gap-1 rounded bg-emerald-950 px-2.5 py-1 text-xs font-bold text-emerald-400 border border-emerald-800">
+                            <CheckCircle2 className="h-3.5 w-3.5" />
+                            SECURE
+                          </span>
+                        ) : (
+                          <span className="inline-flex items-center gap-1 rounded bg-red-950 px-2.5 py-1 text-xs font-bold text-red-400 border border-red-800">
+                            <XCircle className="h-3.5 w-3.5" />
+                            VULNERABLE
+                          </span>
+                        )}
+                      </div>
+                    ) : (
+                      <span className="rounded bg-slate-800 px-2 py-1 text-[10px] text-slate-400 font-mono">
+                        PENDING RUN
+                      </span>
+                    )}
+                  </div>
+
+                  {/* Input Payload & Caller Scope */}
+                  <div className="mt-3 grid grid-cols-1 sm:grid-cols-2 gap-2 text-[11px]">
+                    <div className="rounded-lg bg-slate-950 p-2 border border-slate-800/80">
+                      <span className="text-slate-400 font-semibold">Caller Scope: </span>
+                      <span className="text-cyan-300 font-mono">{sc.callerCustomerId}</span>
+                      <span className="text-slate-400 font-semibold ml-3">Target: </span>
+                      <span className="text-amber-300 font-mono">{sc.targetResourceId}</span>
+                    </div>
+                    <div className="rounded-lg bg-slate-950 p-2 border border-slate-800/80">
+                      <span className="text-slate-400 font-semibold">Expected Audit Event: </span>
+                      <span className="text-purple-300 font-mono">{sc.expectedAuditEventType}</span>
+                    </div>
+                  </div>
+
+                  {/* Result Metrics Strip */}
+                  {result && (
+                    <div className="mt-3 pt-3 border-t border-slate-800/80 grid grid-cols-2 sm:grid-cols-4 gap-2 text-[10px] font-mono">
+                      <div className="rounded bg-slate-900 p-2 border border-slate-800">
+                        <span className="text-slate-400">Actual Outcome:</span>
+                        <div className="text-white font-bold mt-0.5">{result.actualOutcome}</div>
+                      </div>
+                      <div className="rounded bg-slate-900 p-2 border border-slate-800">
+                        <span className="text-slate-400">Threat Neutralized:</span>
+                        <div
+                          className={`font-bold mt-0.5 ${
+                            result.threatNeutralized ? 'text-emerald-400' : 'text-red-400'
+                          }`}
+                        >
+                          {result.threatNeutralized ? 'Yes (Contained)' : 'Failed'}
+                        </div>
+                      </div>
+                      <div className="rounded bg-slate-900 p-2 border border-slate-800">
+                        <span className="text-slate-400">Tampering Prevented:</span>
+                        <div
+                          className={`font-bold mt-0.5 ${
+                            result.unauthorizedTamperingPrevented ? 'text-emerald-400' : 'text-red-400'
+                          }`}
+                        >
+                          {result.unauthorizedTamperingPrevented ? 'Zero Mutation' : 'Corrupted'}
+                        </div>
+                      </div>
+                      <div className="rounded bg-slate-900 p-2 border border-slate-800">
+                        <span className="text-slate-400">Audit Trail Written:</span>
+                        <div
+                          className={`font-bold mt-0.5 ${
+                            result.auditEventLogged ? 'text-purple-400' : 'text-red-400'
+                          }`}
+                        >
+                          {result.auditEventLogged ? 'Verified in Log' : 'Missing Trail'}
+                        </div>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Detailed Log Summary */}
+                  {result && (
+                    <div className="mt-2 text-[10px] text-slate-300 bg-slate-950/80 p-2 rounded border border-slate-800/60">
+                      <span className="text-emerald-400 font-semibold mr-1">Audit Verification:</span>
+                      {result.details}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {/* ============================================================== */}
+      {/* TAB 2: SEMANTIC RAG & GROUNDING SUITE */}
       {/* ============================================================== */}
       {activeSuite === 'rag' && (
         <div className="space-y-6">
-          {/* RAG Benchmark Scorecards */}
           {ragReport ? (
             <div className="grid grid-cols-2 md:grid-cols-5 gap-3 animate-in fade-in">
               <div className="rounded-xl border border-cyan-800 bg-cyan-950/30 p-4">
@@ -361,13 +669,11 @@ export const EvaluationView: React.FC = () => {
                     )}
                   </div>
 
-                  {/* Test Query */}
                   <div className="mt-3 rounded-lg bg-slate-950 p-2.5 border border-slate-800/80 text-[11px]">
                     <span className="text-slate-400 font-semibold">Query: </span>
                     <span className="text-slate-200 font-mono italic">"{sc.query}"</span>
                   </div>
 
-                  {/* Result Metrics Strip */}
                   {result && (
                     <div className="mt-3 pt-3 border-t border-slate-800/80 grid grid-cols-2 sm:grid-cols-4 gap-2 text-[10px] font-mono">
                       <div className="rounded bg-slate-900 p-2 border border-slate-800">
@@ -407,7 +713,6 @@ export const EvaluationView: React.FC = () => {
                     </div>
                   )}
 
-                  {/* Expanded Audit Details & Citations */}
                   {result && isExpanded && (
                     <div className="mt-3 pt-3 border-t border-slate-800/80 space-y-3">
                       <div className="rounded-lg bg-slate-950 p-3 border border-slate-800 text-[11px]">
@@ -440,9 +745,7 @@ export const EvaluationView: React.FC = () => {
                         </div>
                       )}
 
-                      <div className="text-[10px] text-slate-400 italic">
-                        {result.details}
-                      </div>
+                      <div className="text-[10px] text-slate-400 italic">{result.details}</div>
                     </div>
                   )}
                 </div>
@@ -453,7 +756,7 @@ export const EvaluationView: React.FC = () => {
       )}
 
       {/* ============================================================== */}
-      {/* TAB 2: AGENT ORCHESTRATION SUITE */}
+      {/* TAB 3: AGENT ORCHESTRATION SUITE */}
       {/* ============================================================== */}
       {activeSuite === 'agent' && (
         <div className="space-y-6">
